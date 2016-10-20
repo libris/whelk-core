@@ -41,7 +41,9 @@ public class JsonLd {
     private static Logger log = LoggerFactory.getLogger(JsonLd.class)
 
     /**
-     * This flatten-method does not create description-based flat json (i.e. with entry, items and quoted)
+     * This flatten-method does not create description-based flat json
+     * (i.e. with entry, items and quoted)
+     *
      */
     static Map flatten(Map framedJsonLd) {
         if (isFlat(framedJsonLd) || !framedJsonLd.containsKey(ID_KEY)) {
@@ -59,10 +61,12 @@ public class JsonLd {
         if (current instanceof Map) {
             def flattened = makeFlat(current, result)
             if (flattened.containsKey(ID_KEY) && flattened.size() > 1) {
-                result.add(flattened)
+                if (!result.contains(flattened)) {
+                    result.add(flattened)
+                }
             }
             def itemid = current.get(ID_KEY)
-            return (itemid ? [(ID_KEY): itemid] : current)
+            return (itemid ? [(ID_KEY): itemid] : flattened)
         }
         return current
     }
@@ -82,6 +86,133 @@ public class JsonLd {
             updated[(key)] = value
         }
         return updated
+    }
+
+    public static Map frameAndExpand(String mainId, Map jsonLd,
+                                     boolean includeQuoted=true) {
+        try {
+            Map objectsWithId = getObjectsWithId(jsonLd, includeQuoted)
+            Map expanded = expandMainItem(mainId, objectsWithId)
+
+            Set referencedBNodes = new HashSet()
+            getReferencedBNodes(expanded, referencedBNodes)
+
+            cleanUnreferencedBNodeIDs(expanded, referencedBNodes)
+
+            return expanded
+        } catch (StackOverflowError soe) {
+            throw new FramingException("Circular dependency in input")
+        }
+    }
+
+    public static Map getObjectsWithId(Map jsonLd,
+                                       boolean includeQuoted=true) {
+        // expected input: {"@graph": [{"@id": "/foo", ...}, {"@id": ...}]}
+        List items
+        if (jsonLd.containsKey(GRAPH_KEY)) {
+            items = jsonLd.get(GRAPH_KEY)
+        } else {
+            throw new FramingException("Missing '@graph' key in input")
+        }
+
+        Map objectsWithId = [:]
+
+        items.each { item ->
+            if (item instanceof Map && item.containsKey(GRAPH_KEY)) {
+                if (includeQuoted) {
+                    item = item[GRAPH_KEY]
+                } else {
+                    // groovy doesn't allow continue in closures :(
+                    return
+                }
+            }
+
+            if (item instanceof Map && item.containsKey(ID_KEY)) {
+                String id = item.get(ID_KEY)
+                objectsWithId[id] = item
+            }
+        }
+
+        return objectsWithId
+    }
+
+    public static Map expandMainItem(String id, Map objectsWithId) {
+        if (objectsWithId.containsKey(id)) {
+            Map mainItem = objectsWithId[id]
+            expandItem(mainItem, objectsWithId)
+        } else {
+            throw new FramingException("Could not find main item with ID ${id}")
+        }
+    }
+
+    public static Map expandItem(Map item, Map objectsWithId) {
+        Tuple2 acc0 = new Tuple2([:], [:])
+        Tuple2 result = item.inject(acc0) { acc, key, value ->
+            def newMainItem = acc.first
+            def expandedObjects = acc.second
+
+            Tuple2 expanded = expand(value, objectsWithId, expandedObjects)
+
+            def newValue = expanded.first
+            def newExpandedObjects = expanded.second
+
+            newMainItem[key] = newValue
+            new Tuple2(newMainItem, newExpandedObjects)
+        }
+
+        return result.first
+    }
+
+    public static Tuple2 expand(Object object, Map objectsWithId,
+                                Map expandedObjects) {
+        if (object instanceof List) {
+            return expandList(object, objectsWithId, expandedObjects)
+        } else if (object instanceof Map) {
+            return expandMap(object, objectsWithId, expandedObjects)
+        } else {
+            return new Tuple2(object, expandedObjects)
+        }
+    }
+
+    public static Tuple2 expandList(List list, Map objectsWithId,
+                                    Map alreadyExpandedObjects) {
+      Tuple2 acc0 = new Tuple2([], alreadyExpandedObjects)
+      list.inject(acc0) { acc, item ->
+        List result = acc.first
+        Map expandedObjects = acc.second
+        Tuple2 expanded = expand(item, objectsWithId, expandedObjects)
+        def expandedItem = expanded.first
+        def newExpandedObjects = expanded.second
+        result << expandedItem
+        return new Tuple2(result, newExpandedObjects)
+      }
+    }
+
+    public static Tuple2 expandMap(Map input, Map objectsWithId,
+                                   Map expandedObjects) {
+        def id = input.get(ID_KEY)
+        if (id && expandedObjects.containsKey(id)) {
+            // we've already expanded this, so we just return it
+            Tuple2 result = new Tuple2(expandedObjects[id], expandedObjects)
+            return result
+        } else if (id && objectsWithId.containsKey(id)) {
+            // perform local expansion
+            Map expanded = expandItem(objectsWithId[id], objectsWithId)
+            id = expanded.get(ID_KEY)
+            expandedObjects[id] = expanded
+            return new Tuple2(expanded, expandedObjects)
+        } else {
+            Tuple2 acc0 = new Tuple2([:], expandedObjects)
+            return input.inject(acc0) { acc, key, value ->
+                Map result = acc.first
+                Map expandedObjects0 = acc.second
+                Tuple2 expanded = expand(value, objectsWithId, expandedObjects0)
+                Object newValue = expanded.first
+                Map newExpandedObjects = expanded.second
+                result[key] = newValue
+                return new Tuple2(result, newExpandedObjects)
+            }
+        }
     }
 
     public static Map frame(String mainId, Map flatJsonLd) {

@@ -7,10 +7,85 @@ import spock.lang.Ignore
 import org.codehaus.jackson.map.*
 import whelk.Document
 import whelk.JsonLd
+import whelk.exception.FramingException
 import whelk.exception.ModelValidationException
+import java.lang.StackOverflowError
 
 
 class JsonLdSpec extends Specification {
+    static final String FLAT_INPUT_FILE = "flatten-001-in.jsonld"
+    static final String FLAT_OUTPUT_FILE = "flatten-001-out.jsonld"
+    static final String FRAMED_INPUT_FILE = "frame-001-in.jsonld"
+    static final String FRAMED_OUTPUT_FILE = "frame-001-out.jsonld"
+
+    static final String FLAT_INPUT = read_file(FLAT_INPUT_FILE)
+    static final String FLAT_OUTPUT = read_file(FLAT_OUTPUT_FILE)
+    static final String FRAMED_INPUT = read_file(FRAMED_INPUT_FILE)
+    static final String FRAMED_OUTPUT = read_file(FRAMED_OUTPUT_FILE)
+
+    static final String INPUT_ID = "https://libris.kb.se/record/something"
+
+    static final Map simpleGraph = ["@graph": [["@id": "/foo", "bar": "1"]]]
+    static final Map simpleGraphFramed = ["@id": "/foo", "bar": "1"]
+    static final Map simpleGraph2 = ["@graph": [["@id": "/foo",
+                                                 "bar": ["@id": "/bar"]],
+                                                ["@id": "/bar",
+                                                 "someValue": 1]]]
+    static final Map simpleGraphFramed2 = ["@id": "/foo",
+                                           "bar": ["@id": "/bar",
+                                                   "someValue": 1]]
+    static final Map simpleGraph3 = ["@graph": [["@id": "/foo",
+                                                 "bar": ["@id": "/bar"]]]]
+    static final Map simpleGraphFramed3 = ["@id": "/foo",
+                                           "bar": ["@id": "/bar"]]
+    static final Map listGraph = ["@graph": [["@id": "/foo",
+                                              "bar": [["@id": "/baz"],
+                                                      ["@id": "/quux"]]],
+                                             ["@id": "/baz",
+                                              "someValue": 1]]]
+    static final Map listGraphFramed = ["@id": "/foo",
+                                        "bar": [["@id": "/baz",
+                                                 "someValue": 1],
+                                                ["@id": "/quux"]]]
+    static final Map nestedGraph = ["@graph": [["@id": "/foo",
+                                                "bar": [
+                                                    "baz": ["@id": "/baz"]
+                                                ]
+                                               ],
+                                               ["@id": "/baz",
+                                                "someValue": 1]]]
+    static final Map nestedGraphFramed = ["@id": "/foo",
+                                          "bar": ["baz": ["@id": "/baz",
+                                                          "someValue": 1]]]
+    static final Map nestedGraph2 = ["@graph": [["@id": "/foo",
+                                                 "bar": [
+                                                     "baz": ["@id": "/baz"]
+                                                 ],
+                                                 "quux": ["@id": "/baz"]
+                                                ],
+                                                ["@id": "/baz",
+                                                 "someValue": 1]]]
+    static final Map nestedGraphFramed2 = ["@id": "/foo",
+                                           "bar": ["baz": ["@id": "/baz",
+                                                           "someValue": 1]],
+                                           "quux": ["@id": "/baz",
+                                                    "someValue": 1]]
+    static final Map loopedGraph = ["@graph": [["@id": "/foo",
+                                                "bar": ["@id": "/bar"]],
+                                               ["@id": "/bar",
+                                                "foo": ["@id": "/foo"]]]]
+    static final Map quotedGraph = ["@graph": [["@id": "/foo",
+                                                "quoted": ["@id": "/quoted"]],
+                                               ["@graph": ["@id": "/quoted",
+                                                           "quote": "yes"]]]]
+    static final Map quotedGraphFramed = ["@id": "/foo",
+                                          "quoted": ["@id": "/quoted",
+                                                     "quote": "yes"]]
+    static final Map quotedGraphFramedExcludeQuotes = ["@id": "/foo",
+                                                       "quoted": [
+                                                         "@id": "/quoted"
+                                                        ]]
+
 
     static final ObjectMapper mapper = new ObjectMapper()
 
@@ -21,6 +96,116 @@ class JsonLdSpec extends Specification {
         ids                     | items
         ['/some', '/other']     | [['@id': '/some'], ['@id': '/other']]
         ['/some', '/other']     | [['@id': '/some'], ['@graph': ['@id': '/other']]]
+    }
+
+    @Ignore
+    // FIXME should we really keep this test?
+    def "should frame flat jsonld, I"() {
+        given:
+        Map input = mapper.readValue(FLAT_OUTPUT, Map)
+        Map output = mapper.readValue(FLAT_INPUT, Map)
+        expect:
+        assert JsonLd.frame(INPUT_ID, input) == output
+    }
+
+    def "should flatten jsonld"() {
+        given:
+        Map input = mapper.readValue(FLAT_INPUT, Map)
+        Map output = mapper.readValue(FLAT_OUTPUT, Map)
+        expect:
+        assert JsonLd.flatten(input) == output
+    }
+
+    def "should frame and expand"() {
+        given:
+        Map input = mapper.readValue(FRAMED_INPUT, Map)
+        Map output = mapper.readValue(FRAMED_OUTPUT, Map)
+        expect:
+        assert JsonLd.frameAndExpand(INPUT_ID, input) == output
+    }
+
+    def "should also frame and expand"() {
+        expect:
+        assert JsonLd.frameAndExpand(id, input) == output
+        where:
+        id     | input        | output
+        "/foo" | simpleGraph  | simpleGraphFramed
+        "/foo" | simpleGraph2 | simpleGraphFramed2
+        "/foo" | simpleGraph3 | simpleGraphFramed3
+        "/foo" | listGraph  | listGraphFramed
+        "/foo" | nestedGraph  | nestedGraphFramed
+        "/foo" | quotedGraph  | quotedGraphFramed
+    }
+
+    def "should flatten framed jsonld"() {
+        expect:
+        assert JsonLd.flatten(input) == output
+        where:
+        input              | output
+        simpleGraphFramed  | simpleGraph
+        simpleGraphFramed2 | simpleGraph2
+        simpleGraphFramed3 | simpleGraph3
+        listGraphFramed    | listGraph
+        nestedGraphFramed  | nestedGraph
+        nestedGraphFramed2 | nestedGraph2
+        // quotedGraphFramed  | quotedGraph
+    }
+
+    def "should not include quoted items in framing"() {
+        expect:
+        assert JsonLd.frameAndExpand(id, input, false) == output
+        where:
+        id     | input       | output
+        "/foo" | quotedGraph | quotedGraphFramedExcludeQuotes
+    }
+
+    def "should not frame and expand"() {
+        when:
+        JsonLd.frameAndExpand(id, input)
+        then:
+        def error = thrown(expectedException)
+        assert error.message == expectedMessage
+        where:
+        id     | input       | expectedException | expectedMessage
+        "/foo" | [:]         | FramingException  | "Missing '@graph' key in input"
+        "/foo" | loopedGraph | FramingException  | "Circular dependency in input"
+    }
+
+    def "should expand references"() {
+        given:
+        String mainId = "/foo"
+        Map input = ["@graph": [["@id": "/foo",
+                                 "bar": ["@id": "/bar"]],
+                                ["@id": "/bar",
+                                 "baz": ["quux": ["@id": "/quux"]]],
+                                ["@id": "/quux",
+                                 "someValue": 1]]]
+        Map output = ["@id": "/foo",
+                      "bar": ["@id": "/bar",
+                              "baz": ["quux": ["@id": "/quux",
+                                               "someValue": 1]]]]
+        expect:
+        assert JsonLd.frameAndExpand(mainId, input) == output
+    }
+
+    def "should find root objects with @id"() {
+        given:
+        Map input = ["@graph": [["@id": "/foo",
+                                 "bar": ["@id": "/bar"]],
+                                ["@id": "/bar",
+                                 "baz": ["quux": ["@id": "/quux"]]],
+                                ["@id": "/quux",
+                                 "someValue": 1],
+                                ["someOtherValue": 2],
+                                "A lonely string"]]
+        Map output = ["/foo": ["@id": "/foo",
+                               "bar": ["@id": "/bar"]],
+                      "/bar": ["@id": "/bar",
+                               "baz": ["quux": ["@id": "/quux"]]],
+                      "/quux": ["@id": "/quux",
+                                "someValue": 1]]
+        expect:
+        assert JsonLd.getObjectsWithId(input) == output
     }
 
     def "should frame flat jsonld"() {
@@ -175,4 +360,8 @@ class JsonLdSpec extends Specification {
         assert !JsonLd.validateItemModel(invalidDocument)
     }
 
+    static String read_file(String filename) {
+        InputStream is = JsonLdSpec.class.getClassLoader().getResourceAsStream(filename)
+        return IOUtils.toString(is, Charsets.UTF_8)
+    }
 }
